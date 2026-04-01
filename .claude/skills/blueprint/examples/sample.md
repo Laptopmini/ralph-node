@@ -1,41 +1,47 @@
 ## Implementation Plan: Pomodoro Timer Homepage
 
 ### Assumptions
-- The timer is purely client-side (no server state or persistence) — vanilla HTML/CSS/JS since there's no build pipeline or framework
-- "25-minute countdown" means 25:00 displayed as `MM:SS`, counting down to 00:00
-- The timer does not loop or auto-restart — user must manually reset after completion
-- No audio/notification on completion (not specified); a visual indicator (e.g. "Time's up!" message) will suffice
-- Since `serve` is a static file server with no build step, browser code must be vanilla JavaScript (not TypeScript)
+- The timer will be built with vanilla HTML, CSS, and TypeScript — no framework is installed and the PRD does not request one
+- The 25-minute countdown displays as `MM:SS` format (e.g., `25:00`)
+- "Pause" pauses at the current time; "Start" resumes from where it was paused; "Reset" returns the timer to `25:00` and stops it
+- No audio notification or visual alert when the timer reaches `00:00` — the timer simply stops at zero (if desired, this can be added as a follow-up)
+- The existing "Hello World" homepage content will be fully replaced by the Pomodoro timer
 
 ---
 
 ### 1. Tech Stack & Architecture Notes
 
-**Detected stack:** Static HTML served by `serve` v14.2.3 on port 3000. TypeScript configured for Jest/Node only. Vanilla CSS. Jest (unit) + Playwright (E2E).
+**Detected stack:**
+- Static HTML/CSS/TypeScript served by `serve` (v14) on port 3000
+- No frontend framework (no React, Next.js, or Vite)
+- TypeScript compiled via SWC (for tests); `src/` is served as static files
+- Jest (unit tests in `tests/unit/`), Playwright (E2E tests in `tests/e2e/`)
+- Biome for linting/formatting
 
 **Relevant existing patterns:**
-- `src/index.html` is the single entry point, linked to `style.css`
-- E2E tests at `tests/e2e/homepage.spec.ts` already target localhost:3000 and use `data-testid` selectors
-- Unit tests at `tests/unit/` use `@swc/jest` for TypeScript
+- Single-page app structure: `src/index.html` is the entry point, `src/style.css` for styles, `src/index.ts` for logic
+- `serve -s src -l 3000` serves the `src/` directory as a static site
+- E2E tests navigate to `http://localhost:3000/` and assert on visible content
 
 **Recommendations:**
-- Keep timer logic in a separate `src/timer.js` file for separation of concerns and `<script src>` inclusion
-- Extract pure countdown logic into a testable module (`src/timer-logic.ts`) that Jest can import directly — this avoids needing DOM mocks for unit testing core arithmetic
-- Existing `src/index.ts` can be repurposed or left as-is (it's an empty export placeholder)
+- Keep the timer logic in a separate TypeScript module (`src/timer.ts`) so it can be unit-tested independently via Jest — the pure logic (countdown math, state transitions) should be importable without a DOM
+- Compile `src/timer.ts` to `src/timer.js` so it can be loaded by the HTML page via a `<script>` tag, or inline the compiled JS. Since `serve` serves static files, the simplest approach is to write the browser-facing code in a plain `.js` file (`src/app.js`) that imports from the timer module, keeping `src/timer.ts` as the testable logic layer
+- No new dependencies are needed
 
 ---
 
 ### 2. File & Code Structure
 
 **New files:**
-- `src/timer.js` — Browser-side timer controller (DOM interaction + countdown orchestration)
-- `src/timer-logic.ts` — Pure functions for time formatting and countdown math (testable by Jest)
-- `tests/unit/timer-logic.test.ts` — Unit tests for time formatting and countdown logic
-- `tests/e2e/pomodoro.spec.ts` — E2E tests for timer UI (start, pause, reset, countdown, completion)
+- `src/timer.ts` — pure timer logic (no DOM)
+- `src/app.js` — browser script that wires DOM to timer logic
 
 **Modified files:**
-- `src/index.html` — Replace "Hello World" with Pomodoro timer UI
-- `src/style.css` — Add timer-specific styles
+- `src/index.html` — replace "Hello World" with Pomodoro timer UI
+- `src/style.css` — add styles for timer display and buttons
+
+**Conflicting test files to remove:**
+- `tests/e2e/homepage.spec.ts` — asserts "Hello World" text which will no longer exist on the homepage
 
 ---
 
@@ -45,49 +51,72 @@ Each ticket is an independent workstream. No two tickets touch the same file.
 
 ---
 
-#### Ticket 1: Timer Logic (Pure Functions)
+#### Ticket 1: Timer Logic Module
 
-> Implement and unit-test the pure countdown logic that powers the timer — no DOM, no UI.
+> Pure TypeScript module implementing the Pomodoro countdown state machine, testable without a browser.
 
 **Constraints:**
-- Must be a TypeScript module importable by Jest (Node environment)
-- No DOM or browser APIs — pure functions only
-- Use `data-testid` conventions in any test utilities if needed
+- Must be a pure module with no DOM or browser API references — use dependency injection for the clock (`Date.now` or a callback) so tests can control time
+- Export all public functions and types so Jest can import them directly
 
 **Files owned:**
-- `src/timer-logic.ts` (create)
-- `tests/unit/timer-logic.test.ts` (create)
+- `src/timer.ts` (create)
 
 **Tasks:**
-1. [logic] Create `src/timer-logic.ts` with pure functions: `formatTime(totalSeconds: number): string` (returns `"MM:SS"`), `tick(remainingSeconds: number): number` (decrements by 1, floors at 0), and a constant `POMODORO_DURATION_SECONDS = 1500`
-2. [logic] Create `tests/unit/timer-logic.test.ts` — test `formatTime` (25:00, 00:00, 09:59 edge cases), test `tick` (decrements, does not go below 0), test duration constant equals 1500
+1. [logic] Create `src/timer.ts` exporting a `PomodoroTimer` class (or equivalent factory) with the following interface:
+   - Constructor accepts `durationSeconds: number` (default `1500` for 25 minutes) and an `onTick` callback `(remainingSeconds: number) => void`
+   - `start()` — begins or resumes the countdown, calling `onTick` every second with the remaining seconds. If already running, no-op
+   - `pause()` — pauses the countdown, preserving the remaining time. If not running, no-op
+   - `reset()` — stops the countdown and resets remaining time to the initial `durationSeconds`, calling `onTick` once with the reset value
+   - `getRemaining(): number` — returns current remaining seconds
+   - `isRunning(): boolean` — returns whether the timer is actively counting down
+   - When remaining seconds reaches `0`, the timer stops automatically and calls `onTick(0)`
+   - Use `setInterval` / `clearInterval` internally (1-second interval). Accept an optional `intervalFn` parameter for testability (defaults to `setInterval`/`clearInterval`)
 
 ---
 
-#### Ticket 2: Timer UI & Browser Integration
+#### Ticket 2: UI & Styling
 
-> Build the Pomodoro timer interface as the homepage with Start, Pause, Reset buttons and a countdown display, plus E2E test coverage.
+> Replace the Hello World homepage with the Pomodoro timer interface and wire it to the timer logic.
 
 **Constraints:**
 - Use `data-testid` attributes on all interactive and display elements
-- Vanilla JS only (no build step available for browser code)
-- Existing E2E test `tests/e2e/homepage.spec.ts` checks for "Hello World" — it must be updated or the new E2E test must replace its expectations
-- Timer display, Start, Pause, and Reset buttons must all be present on page load
+- The page must remain a single static HTML file served by `serve`
+- Follow existing Biome formatting rules (double quotes, trailing commas, semicolons, 2-space indent)
 
 **Files owned:**
 - `src/index.html` (modify)
 - `src/style.css` (modify)
-- `src/timer.js` (create)
-- `tests/e2e/pomodoro.spec.ts` (create)
-- `tests/e2e/homepage.spec.ts` (modify)
+- `src/app.js` (create)
+- `tests/e2e/homepage.spec.ts` (delete)
 
 **Tasks:**
-1. [ui] Modify `src/index.html` — replace the `<h1>Hello World</h1>` body content with a Pomodoro timer layout: a heading ("Pomodoro Timer"), a time display element (`data-testid="time-display"` showing `25:00`), and three buttons (`data-testid="start-btn"`, `data-testid="pause-btn"`, `data-testid="reset-btn"`). Add `<script src="timer.js"></script>` before `</body>`
-2. [ui] Modify `src/style.css` — add styles for the timer container (centered layout), time display (large monospace font), and buttons (distinct visual states for start/pause/reset)
-3. [logic] Create `src/timer.js` — implement the browser-side timer controller using `setInterval`: Start begins/resumes the countdown, Pause clears the interval and preserves remaining time, Reset clears the interval and restores display to `25:00`. Show a "Time's up!" message when countdown reaches `00:00`
-4. [ui] Modify `tests/e2e/homepage.spec.ts` — update or remove the "Hello World" assertion since the homepage content is changing (replace with a check that the page loads and contains the Pomodoro timer heading)
-5. [ui] Create `tests/e2e/pomodoro.spec.ts` — E2E tests: timer displays `25:00` on load; clicking Start begins countdown (verify display changes after a short wait); clicking Pause freezes the display; clicking Reset restores `25:00`; verify all three buttons are visible and clickable
+1. [infra] Delete `tests/e2e/homepage.spec.ts` — this E2E test asserts "Hello World" text which will no longer exist after the homepage is replaced by the Pomodoro timer. Verify the file no longer exists on disk and that no other source files import or reference it
+2. [ui] Modify `src/index.html` — replace the `<body>` content with the Pomodoro timer layout:
+   - Page title: `<h1 data-testid="page-title">Pomodoro Timer</h1>`
+   - Timer display: `<div data-testid="timer-display">25:00</div>` — large, centered text showing `MM:SS`
+   - Three buttons in a row:
+     - `<button data-testid="start-button">Start</button>`
+     - `<button data-testid="pause-button">Pause</button>`
+     - `<button data-testid="reset-button">Reset</button>`
+   - Add a `<script src="app.js"></script>` tag before `</body>`
+   - Keep the existing `<link rel="stylesheet" href="style.css" />` in the head
+   - Keep the `<title>` as "Pomodoro Timer"
+3. [ui] Modify `src/style.css` — add styles for the timer UI:
+   - Center the content vertically and horizontally on the page
+   - `[data-testid="timer-display"]`: large font size (at least 4rem), monospace font, centered
+   - Buttons: visually distinct, at least 44px tall for accessibility, spaced evenly, with hover/active states
+   - Responsive: readable on mobile viewports (min-width 320px)
+4. [logic] Create `src/app.js` — browser script that:
+   - On `DOMContentLoaded`, selects elements by `data-testid` attributes
+   - Implements the timer countdown inline (since the `timer.ts` module is for unit-testable logic, `app.js` is the browser-compatible wiring):
+     - Maintains state: `remainingSeconds` (initially `1500`), `intervalId` (initially `null`)
+     - Formats time as `MM:SS` using `Math.floor(remaining / 60)` and `remaining % 60`, zero-padded
+     - **Start button click**: if not running, starts a `setInterval` (1 second) that decrements `remainingSeconds`, updates the display, and auto-stops at `0`
+     - **Pause button click**: clears the interval (if running), preserving `remainingSeconds`
+     - **Reset button click**: clears the interval, sets `remainingSeconds` back to `1500`, updates display to `25:00`
+   - Updates `[data-testid="timer-display"]` text content on every tick
 
 ---
 
-> **Note:** Tickets can be worked in parallel. Ticket 1 produces the pure logic module; Ticket 2 builds the UI. The browser-side `timer.js` will inline its own countdown logic (since there's no bundler to import `.ts`), but keeping `timer-logic.ts` separately tested ensures correctness of the core math. Tasks within each ticket are sequential.
+> **Note:** Tickets can be worked in parallel. Tasks within each ticket are sequential. No ticket includes test creation — testing is handled separately.
